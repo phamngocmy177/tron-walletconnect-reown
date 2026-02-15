@@ -24,8 +24,8 @@ const metadata = {
     icons: ['https://yourdapp-url.com/icon.png'],
 };
 
-// Create modal
-createAppKit({
+// Create modal - store instance so TronConnectButton can reuse its UniversalProvider
+export const appKit = createAppKit({
     adapters: [wagmiAdapter, solanaAdapter, bitcoinAdapter],
     projectId,
     networks: networks as unknown as [AppKitNetwork, ...AppKitNetwork[]],

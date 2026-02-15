@@ -1,40 +1,130 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { WalletConnectAdapter } from '@tronweb3/tronwallet-adapter-walletconnect';
+import { useState, useCallback, useRef } from 'react';
+import UniversalProvider from '@walletconnect/universal-provider';
+import { appKit } from '../context';
+import { projectId } from '../config';
 
-const adapter = new WalletConnectAdapter({
-    network: 'Mainnet',
-    options: {
+const TRON_CHAIN_ID = 'tron:0x2b6653dc';
+const TRON_METHODS = ['tron_signTransaction', 'tron_signMessage'];
+
+// Fully independent Tron provider — separate SignClient & Core from AppKit.
+// The "Core already initialized" console warning is harmless (just informational).
+// What matters is: no shared sessions, so wagmi never sees Tron addresses.
+let tronProviderPromise: Promise<InstanceType<typeof UniversalProvider>> | null = null;
+
+async function getTronProvider() {
+    if (tronProviderPromise) return tronProviderPromise;
+
+    tronProviderPromise = UniversalProvider.init({
+        projectId,
         relayUrl: 'wss://relay.walletconnect.com',
-        projectId: 'c47dba8edb6a441868226b639c3a2a93', // Add your WalletConnect project ID here
         metadata: {
-            name: 'Example App',
-            description: 'Example App',
-            url: 'https://yourdapp-url.com',
+            name: 'Tron Reown Wallet Connect',
+            description: 'Multi-chain wallet connection app',
+            url: typeof window !== 'undefined' ? window.location.origin : 'https://yourdapp-url.com',
             icons: ['https://yourdapp-url.com/icon.png'],
         },
-    },
-    themeMode: 'dark',
-    themeVariables: {
-        '--w3m-z-index': 1000,
-    },
-});
+        // Use a separate storage key so Tron sessions don't collide with AppKit's
+        name: 'tron-wc-provider',
+    }).catch((err) => {
+        tronProviderPromise = null;
+        throw err;
+    });
+
+    return tronProviderPromise;
+}
 
 export default function TronConnectButton() {
     const [address, setAddress] = useState<string | null>(null);
     const [connecting, setConnecting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const sessionTopicRef = useRef<string | null>(null);
 
     const connect = useCallback(async () => {
         setConnecting(true);
         setError(null);
         try {
-            await adapter.connect();
-            setAddress(adapter.address);
+            const provider = await getTronProvider();
+            const client = provider.client;
+
+            // Check for existing Tron sessions
+            const existingSessions = client.find({
+                requiredNamespaces: {
+                    tron: {
+                        chains: [TRON_CHAIN_ID],
+                        methods: TRON_METHODS,
+                        events: [],
+                    },
+                },
+            }).filter((s: { acknowledged: boolean }) => s.acknowledged);
+
+            let session;
+            if (existingSessions.length) {
+                session = existingSessions[existingSessions.length - 1];
+            } else {
+                // Listen for the WC URI, then open AppKit directly to QR code view
+                const uriPromise = new Promise<string>((resolve) => {
+                    provider.once('display_uri', (uri: string) => {
+                        resolve(uri);
+                    });
+                });
+
+                // Start WC pairing — this triggers the display_uri event
+                const connectPromise = provider.connect({
+                    optionalNamespaces: {
+                        tron: {
+                            chains: [TRON_CHAIN_ID],
+                            methods: TRON_METHODS,
+                            events: [],
+                        },
+                    },
+                });
+
+                // Wait for URI, then open modal directly to QR code view
+                const uri = await uriPromise;
+                await appKit.open({ uri, view: 'ConnectingWalletConnectBasic' });
+
+                // Detect if user closes modal before connecting
+                const modalClosePromise = new Promise<never>((_, reject) => {
+                    let isOpen = true;
+                    const unsubscribe = appKit.subscribeState((state: { open: boolean }) => {
+                        if (isOpen && !state.open) {
+                            unsubscribe();
+                            reject(new Error('User closed the connection modal'));
+                        }
+                        isOpen = state.open;
+                    });
+                });
+
+                session = await Promise.race([connectPromise, modalClosePromise]);
+                await appKit.close();
+            }
+
+            if (!session) {
+                throw new Error('No session returned');
+            }
+
+            sessionTopicRef.current = session.topic;
+
+            // Extract address from session (format: "tron:0x2b6653dc:Txxxxxxx")
+            const accounts = Object.values(session.namespaces)
+                .flatMap((ns: { accounts: string[] }) => ns.accounts);
+            const tronAccount = accounts[0];
+            const addr = tronAccount?.split(':')[2];
+
+            if (addr) {
+                setAddress(addr);
+            } else {
+                throw new Error('No Tron address found in session');
+            }
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to connect');
-            console.error('Connection error:', err);
+            if (err instanceof Error && err.message.includes('closed')) {
+                setError(null);
+            } else {
+                setError(err instanceof Error ? err.message : 'Failed to connect');
+                console.error('Connection error:', err);
+            }
         } finally {
             setConnecting(false);
         }
@@ -42,10 +132,18 @@ export default function TronConnectButton() {
 
     const disconnect = useCallback(async () => {
         try {
-            await adapter.disconnect();
-            setAddress(null);
+            if (sessionTopicRef.current) {
+                const provider = await getTronProvider();
+                await provider.client.disconnect({
+                    topic: sessionTopicRef.current,
+                    reason: { code: 6000, message: 'User disconnected' },
+                });
+            }
         } catch (err) {
             console.error('Disconnect error:', err);
+        } finally {
+            sessionTopicRef.current = null;
+            setAddress(null);
         }
     }, []);
 
