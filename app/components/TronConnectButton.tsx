@@ -39,6 +39,9 @@ export default function TronConnectButton() {
     const [address, setAddress] = useState<string | null>(null);
     const [connecting, setConnecting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [result, setResult] = useState<string | null>(null);
+    const [signing, setSigning] = useState(false);
+    const [sending, setSending] = useState(false);
     const sessionTopicRef = useRef<string | null>(null);
 
     const connect = useCallback(async () => {
@@ -58,7 +61,6 @@ export default function TronConnectButton() {
                     },
                 },
             }).filter((s: { acknowledged: boolean }) => s.acknowledged);
-
             let session;
             if (existingSessions.length) {
                 session = existingSessions[existingSessions.length - 1];
@@ -144,8 +146,84 @@ export default function TronConnectButton() {
         } finally {
             sessionTopicRef.current = null;
             setAddress(null);
+            setResult(null);
         }
     }, []);
+
+    const handleSignMessage = useCallback(async () => {
+        if (!sessionTopicRef.current || !address) return;
+        setSigning(true);
+        setResult(null);
+        try {
+            const provider = await getTronProvider();
+            const signature = await provider.client.request({
+                chainId: TRON_CHAIN_ID,
+                topic: sessionTopicRef.current,
+                request: {
+                    method: 'tron_signMessage',
+                    params: {
+                        address,
+                        message: 'Hello from Tron WalletConnect!',
+                    },
+                },
+            });
+            setResult(`Signature: ${JSON.stringify(signature)}`);
+        } catch (err) {
+            setResult(`Error: ${err instanceof Error ? err.message : 'Sign failed'}`);
+        } finally {
+            setSigning(false);
+        }
+    }, [address]);
+
+    const handleSignTransaction = useCallback(async () => {
+        if (!sessionTopicRef.current || !address) return;
+        setSending(true);
+        setResult(null);
+        try {
+            const provider = await getTronProvider();
+            // Minimal TRX transfer (1 SUN = 0.000001 TRX) to self
+            const transaction = {
+                visible: true,
+                txID: '',
+                raw_data: {
+                    contract: [
+                        {
+                            parameter: {
+                                value: {
+                                    amount: 1,
+                                    owner_address: address,
+                                    to_address: address,
+                                },
+                                type_url: 'type.googleapis.com/protocol.TransferContract',
+                            },
+                            type: 'TransferContract',
+                        },
+                    ],
+                    ref_block_bytes: '',
+                    ref_block_hash: '',
+                    expiration: Date.now() + 60000,
+                    timestamp: Date.now(),
+                },
+                raw_data_hex: '',
+            };
+            const signedTx = await provider.client.request({
+                chainId: TRON_CHAIN_ID,
+                topic: sessionTopicRef.current,
+                request: {
+                    method: 'tron_signTransaction',
+                    params: {
+                        address,
+                        transaction: { transaction },
+                    },
+                },
+            });
+            setResult(`Signed Tx: ${JSON.stringify(signedTx).slice(0, 200)}...`);
+        } catch (err) {
+            setResult(`Error: ${err instanceof Error ? err.message : 'Sign tx failed'}`);
+        } finally {
+            setSending(false);
+        }
+    }, [address]);
 
     const formatAddress = (addr: string) => {
         return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
@@ -153,16 +231,41 @@ export default function TronConnectButton() {
 
     if (address) {
         return (
-            <div className="flex items-center gap-3">
-                <span className="px-3 py-2 bg-green-500/10 text-green-500 rounded-lg text-sm font-mono">
-                    {formatAddress(address)}
-                </span>
-                <button
-                    onClick={disconnect}
-                    className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
-                >
-                    Disconnect
-                </button>
+            <div className="flex flex-col items-center gap-3">
+                <div className="flex items-center gap-3">
+                    <span className="px-3 py-2 bg-green-500/10 text-green-500 rounded-lg text-sm font-mono">
+                        {formatAddress(address)}
+                    </span>
+                    <button
+                        onClick={disconnect}
+                        className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
+                    >
+                        Disconnect
+                    </button>
+                </div>
+
+                <div className="flex gap-2">
+                    <button
+                        onClick={handleSignMessage}
+                        disabled={signing}
+                        className="px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-purple-500/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                    >
+                        {signing ? 'Signing...' : 'Sign Message'}
+                    </button>
+                    <button
+                        onClick={handleSignTransaction}
+                        disabled={sending}
+                        className="px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-500/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                    >
+                        {sending ? 'Signing...' : 'Sign Transaction'}
+                    </button>
+                </div>
+
+                {result && (
+                    <p className={`text-sm max-w-md break-all text-center ${result.startsWith('Error') ? 'text-red-500' : 'text-green-500'}`}>
+                        {result}
+                    </p>
+                )}
             </div>
         );
     }
